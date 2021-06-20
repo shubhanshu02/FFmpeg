@@ -1148,14 +1148,14 @@ static DNNReturnType execute_model_tf(TFRequestItem *request, Queue *inference_q
     inference = ff_queue_peek_front(inference_queue);
     if (!inference) {
         av_log(NULL, AV_LOG_ERROR, "Failed to get inference item\n");
-        return DNN_ERROR;
+        goto err;
     }
     task = inference->task;
     tf_model = task->model;
     ctx = &tf_model->ctx;
 
     if (fill_model_input_tf(tf_model, request) != DNN_SUCCESS) {
-        return DNN_ERROR;
+        goto err;
     }
 
     if (task->async) {
@@ -1163,13 +1163,19 @@ static DNNReturnType execute_model_tf(TFRequestItem *request, Queue *inference_q
     } else {
         tf_start_inference(request);
         if (TF_GetCode(tf_model->status) != TF_OK) {
-            tf_free_request(request->infer_request);
             av_log(ctx, AV_LOG_ERROR, "Failed to run session when executing model\n");
-            return DNN_ERROR;
+            goto err;
         }
         infer_completion_callback(request);
         return (task->inference_done == task->inference_todo) ? DNN_SUCCESS : DNN_ERROR;
     }
+err:
+    tf_free_request(request->infer_request);
+    if (ff_safe_queue_push_back(tf_model->request_queue, request) < 0) {
+        av_freep(&request->infer_request);
+        av_freep(&request);
+    }
+    return DNN_ERROR;
 }
 
 DNNReturnType ff_dnn_execute_model_tf(const DNNModel *model, DNNExecBaseParams *exec_params)
