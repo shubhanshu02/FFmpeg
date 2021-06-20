@@ -35,6 +35,7 @@
 #include "dnn_backend_native_layer_maximum.h"
 #include "dnn_io_proc.h"
 #include "dnn_backend_common.h"
+#include "libavutil/thread.h"
 #include "safe_queue.h"
 #include "queue.h"
 #include <tensorflow/c/c_api.h>
@@ -57,6 +58,7 @@ typedef struct TFModel{
     TF_Status *status;
     SafeQueue *request_queue;
     Queue *inference_queue;
+    Queue *task_queue;
 } TFModel;
 
 /**
@@ -73,7 +75,10 @@ typedef struct TFInferRequest {
 typedef struct TFRequestItem {
     TFInferRequest *infer_request;
     InferenceItem *inference;
-    // further properties will be added later for async
+#if HAVE_PTHREAD_CANCEL
+    pthread_t thread;
+    pthread_attr_t thread_attr;
+#endif
 } TFRequestItem;
 
 #define OFFSET(x) offsetof(TFContext, x)
@@ -87,6 +92,7 @@ static const AVOption dnn_tensorflow_options[] = {
 AVFILTER_DEFINE_CLASS(dnn_tensorflow);
 
 static DNNReturnType execute_model_tf(TFRequestItem *request, Queue *inference_queue);
+static void infer_completion_callback(void *args);
 
 static void free_buffer(void *data, size_t length)
 {
@@ -114,6 +120,59 @@ static TFInferRequest *tf_create_inference_request(void)
     infer_request->input_tensor = NULL;
     infer_request->output_tensors = NULL;
     return infer_request;
+}
+
+static void tf_start_inference(TFRequestItem *request)
+{
+    TFInferRequest *infer_request = request->infer_request;
+    InferenceItem *inference = request->inference;
+    TaskItem *task = inference->task;
+    TFModel *tf_model = task->model;
+
+    TF_SessionRun(tf_model->session, NULL,
+                  infer_request->tf_input, &infer_request->input_tensor, 1,
+                  infer_request->tf_outputs, infer_request->output_tensors,
+                  task->nb_output, NULL, 0, NULL,
+                  tf_model->status);
+}
+
+static void *tf_thread_routine(void *arg)
+{
+    TFRequestItem *request = arg;
+    tf_start_inference(request);
+    infer_completion_callback(request);
+#if HAVE_PTHREAD_CANCEL
+    pthread_exit(0);
+#endif
+}
+
+static DNNReturnType tf_start_inference_async(TFRequestItem *request)
+{
+    InferenceItem *inference = request->inference;
+    TaskItem *task = inference->task;
+    TFModel *tf_model = task->model;
+    TFContext *ctx = &tf_model->ctx;
+    int ret;
+
+#if HAVE_PTHREAD_CANCEL
+    ret = pthread_create(&request->thread, &request->thread_attr, tf_thread_routine, request);
+    if (ret != 0)
+    {
+        av_log(ctx, AV_LOG_ERROR, "unable to start async inference\n");
+        return DNN_ERROR;
+    }
+    return DNN_SUCCESS;
+#else
+    av_log(ctx, AV_LOG_WARNING, "pthreads not supported. Roll back to sync\n");
+    tf_start_inference(request);
+    if (TF_GetCode(tf_model->status) != TF_OK) {
+        tf_free_request(request->infer_request);
+        av_log(ctx, AV_LOG_ERROR, "Failed to run session when executing model\n");
+        return DNN_ERROR;
+    }
+    infer_completion_callback(request);
+    return (task->inference_done == task->inference_todo) ? DNN_SUCCESS : DNN_ERROR;
+#endif
 }
 
 static DNNReturnType extract_inference_from_task(TaskItem *task, Queue *inference_queue)
