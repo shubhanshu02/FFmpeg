@@ -99,6 +99,13 @@ static void free_buffer(void *data, size_t length)
     av_freep(&data);
 }
 
+/**
+ * Free the contents of TensorFlow inference request.
+ * It does not free the TFInferRequest instance.
+ *
+ * @param request pointer to TFInferRequest instance.
+ * NULL pointer is allowed.
+ */
 static void tf_free_request(TFInferRequest *request)
 {
     if (!request)
@@ -112,7 +119,13 @@ static void tf_free_request(TFInferRequest *request)
     av_freep(&request->output_tensors);
 }
 
-static TFInferRequest *tf_create_inference_request(void)
+/**
+ * Create a TensorFlow inference request. All properties
+ * are initially unallocated and set as NULL.
+ *
+ * @return pointer to the allocated TFInferRequest instance.
+ */
+static TFInferRequest* tf_create_inference_request(void)
 {
     TFInferRequest *infer_request = av_malloc(sizeof(TFInferRequest));
     infer_request->tf_outputs = NULL;
@@ -122,6 +135,13 @@ static TFInferRequest *tf_create_inference_request(void)
     return infer_request;
 }
 
+/**
+ * Start synchronous inference for the TensorFlow model.
+ * It does not check for the status of the operation.
+ * Check using tf_model->status.
+ *
+ * @param request pointer to the TFRequestItem for inference
+ */
 static void tf_start_inference(TFRequestItem *request)
 {
     TFInferRequest *infer_request = request->infer_request;
@@ -129,6 +149,10 @@ static void tf_start_inference(TFRequestItem *request)
     TaskItem *task = inference->task;
     TFModel *tf_model = task->model;
 
+    if (!request) {
+        av_log(&tf_model->ctx, AV_LOG_ERROR, "TFRequestItem is NULL\n");
+        return;
+    }
     TF_SessionRun(tf_model->session, NULL,
                   infer_request->tf_input, &infer_request->input_tensor, 1,
                   infer_request->tf_outputs, infer_request->output_tensors,
@@ -136,6 +160,12 @@ static void tf_start_inference(TFRequestItem *request)
                   tf_model->status);
 }
 
+/**
+ * Thread routine for async inference. It calls completion
+ * callback on completion of inference.
+ *
+ * @param arg pointer to TFRequestItem instance for inference
+ */
 static void *tf_thread_routine(void *arg)
 {
     TFRequestItem *request = arg;
@@ -146,33 +176,57 @@ static void *tf_thread_routine(void *arg)
 #endif
 }
 
+/**
+ * Start asynchronous inference routine for the TensorFlow
+ * model on a detached thread. It calls the completion callback
+ * after the inference completes.
+ * In case pthreads aren't supported, the execution rolls back
+ * to synchronous mode, calling completion callback after inference.
+ *
+ * @param request pointer to the TFRequestItem for inference
+ * @retval DNN_SUCCESS on the start of async inference.
+ * @retval DNN_ERROR in case async inference cannot be started
+ */
 static DNNReturnType tf_start_inference_async(TFRequestItem *request)
 {
+    int ret;
     InferenceItem *inference = request->inference;
     TaskItem *task = inference->task;
     TFModel *tf_model = task->model;
     TFContext *ctx = &tf_model->ctx;
-    int ret;
+
+    if (!request) {
+        av_log(ctx, AV_LOG_ERROR, "TFRequestItem is NULL\n");
+        return DNN_ERROR;
+    }
 
 #if HAVE_PTHREAD_CANCEL
     ret = pthread_create(&request->thread, &request->thread_attr, tf_thread_routine, request);
     if (ret != 0)
     {
         av_log(ctx, AV_LOG_ERROR, "unable to start async inference\n");
-        return DNN_ERROR;
+        ret = DNN_ERROR;
+        goto err;
     }
     return DNN_SUCCESS;
 #else
     av_log(ctx, AV_LOG_WARNING, "pthreads not supported. Roll back to sync\n");
     tf_start_inference(request);
     if (TF_GetCode(tf_model->status) != TF_OK) {
-        tf_free_request(request->infer_request);
         av_log(ctx, AV_LOG_ERROR, "Failed to run session when executing model\n");
-        return DNN_ERROR;
+        ret = DNN_ERROR;
+        goto err;
     }
     infer_completion_callback(request);
     return (task->inference_done == task->inference_todo) ? DNN_SUCCESS : DNN_ERROR;
 #endif
+err:
+    tf_free_request(request->infer_request);
+    if (ff_safe_queue_push_back(tf_model->request_queue, request) < 0) {
+        av_freep(&request->infer_request);
+        av_freep(&request);
+    }
+    return ret;
 }
 
 static DNNReturnType extract_inference_from_task(TaskItem *task, Queue *inference_queue)
