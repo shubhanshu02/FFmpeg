@@ -56,9 +56,11 @@ typedef struct TFModel{
     TF_Graph *graph;
     TF_Session *session;
     TF_Status *status;
-    SafeQueue *request_queue;
+    SafeQueue *request_queue; // stores empty RequestItems
     Queue *inference_queue;
     Queue *task_queue;
+    pthread_t thread;
+    SafeQueue *async_queue; // stores exeuction-ready RequestItems
 } TFModel;
 
 /**
@@ -171,9 +173,7 @@ static void *tf_thread_routine(void *arg)
     TFRequestItem *request = arg;
     tf_start_inference(request);
     infer_completion_callback(request);
-#if HAVE_PTHREAD_CANCEL
-    pthread_exit(0);
-#endif
+    return NULL;
 }
 
 /**
@@ -189,7 +189,6 @@ static void *tf_thread_routine(void *arg)
  */
 static DNNReturnType tf_start_inference_async(TFRequestItem *request)
 {
-    int ret;
     InferenceItem *inference = request->inference;
     TaskItem *task = inference->task;
     TFModel *tf_model = task->model;
@@ -200,33 +199,8 @@ static DNNReturnType tf_start_inference_async(TFRequestItem *request)
         return DNN_ERROR;
     }
 
-#if HAVE_PTHREAD_CANCEL
-    ret = pthread_create(&request->thread, &request->thread_attr, tf_thread_routine, request);
-    if (ret != 0)
-    {
-        av_log(ctx, AV_LOG_ERROR, "unable to start async inference\n");
-        ret = DNN_ERROR;
-        goto err;
-    }
+    ff_safe_queue_push_back(tf_model->async_queue, request);
     return DNN_SUCCESS;
-#else
-    av_log(ctx, AV_LOG_WARNING, "pthreads not supported. Roll back to sync\n");
-    tf_start_inference(request);
-    if (TF_GetCode(tf_model->status) != TF_OK) {
-        av_log(ctx, AV_LOG_ERROR, "Failed to run session when executing model\n");
-        ret = DNN_ERROR;
-        goto err;
-    }
-    infer_completion_callback(request);
-    return (task->inference_done == task->inference_todo) ? DNN_SUCCESS : DNN_ERROR;
-#endif
-err:
-    tf_free_request(request->infer_request);
-    if (ff_safe_queue_push_back(tf_model->request_queue, request) < 0) {
-        av_freep(&request->infer_request);
-        av_freep(&request);
-    }
-    return ret;
 }
 
 static DNNReturnType extract_inference_from_task(TaskItem *task, Queue *inference_queue)
@@ -890,6 +864,22 @@ static DNNReturnType load_native_model(TFModel *tf_model, const char *model_file
     return DNN_SUCCESS;
 }
 
+// async execution thread runner function
+static void *runner(void *arg) {
+    TFModel *tf_model = arg;
+    TFRequestItem *request;
+
+    while (1) {
+        // pop RequestItem
+        // thread waits if queue is empty
+        request = ff_safe_queue_pop_front(tf_model->async_queue);
+        // execute request
+        tf_thread_routine(request);
+    }
+
+    pthread_exit(0);
+}
+
 DNNModel *ff_dnn_load_model_tf(const char *model_filename, DNNFunctionType func_type, const char *options, AVFilterContext *filter_ctx)
 {
     DNNModel *model = NULL;
@@ -931,6 +921,13 @@ DNNModel *ff_dnn_load_model_tf(const char *model_filename, DNNFunctionType func_
     if (!tf_model->request_queue) {
         goto err;
     }
+
+    tf_model->async_queue = ff_safe_queue_create();
+    if (!tf_model->async_queue) {
+        goto err;
+    }
+    // start async inference thread
+    pthread_create(&tf_model->thread, NULL, runner, tf_model);
 
     for (int i = 0; i < ctx->options.nireq; i++) {
         TFRequestItem *item = av_mallocz(sizeof(*item));
@@ -1305,6 +1302,10 @@ void ff_dnn_free_model_tf(DNNModel **model)
 
     if (*model){
         tf_model = (*model)->model;
+        // cancel the async thead
+        // av_log(NULL, AV_LOG_WARNING, "\n Ending the async execution thread \n");
+        pthread_cancel(tf_model->thread);
+        // av_log(NULL, AV_LOG_WARNING, "\n Cancelled the async execution thread \n");
         while (ff_safe_queue_size(tf_model->request_queue) != 0) {
             TFRequestItem *item = ff_safe_queue_pop_front(tf_model->request_queue);
 #if HAVE_PTHREAD_CANCEL
