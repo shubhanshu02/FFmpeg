@@ -25,6 +25,10 @@
 #define AVFILTER_DNN_DNN_BACKEND_COMMON_H
 
 #include "../dnn_interface.h"
+#include "libavutil/thread.h"
+
+#define DNN_BACKEND_COMMON_OPTIONS \
+    { "nireq",           "number of request",             OFFSET(options.nireq),           AV_OPT_TYPE_INT,    { .i64 = 0 },     0, INT_MAX, FLAGS },
 
 // one task for one function call from dnn interface
 typedef struct TaskItem {
@@ -45,6 +49,20 @@ typedef struct InferenceItem {
     TaskItem *task;
     uint32_t bbox_index;
 } InferenceItem;
+
+typedef struct DNNAsyncExecModule {
+#if HAVE_PTHREAD_CANCEL
+    pthread_t thread_id;
+    pthread_attr_t thread_attr;
+#endif
+    DNNReturnType (*start_inference)(void *request);
+    DNNReturnType (*callback)(void *args);
+    void *args;
+} DNNAsyncExecModule;
+
+DNNReturnType ff_init_async_attributes(DNNAsyncExecModule *async_module);
+DNNReturnType ff_destroy_async_attributes(DNNAsyncExecModule *async_module);
+DNNReturnType ff_dnn_start_inference_async(DNNAsyncExecModule *async_module, void *ctx);
 
 int ff_check_exec_params(void *ctx, DNNBackendType backend, DNNFunctionType func_type, DNNExecBaseParams *exec_params);
 
