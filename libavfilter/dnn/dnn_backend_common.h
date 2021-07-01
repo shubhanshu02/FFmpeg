@@ -24,6 +24,7 @@
 #ifndef AVFILTER_DNN_DNN_BACKEND_COMMON_H
 #define AVFILTER_DNN_DNN_BACKEND_COMMON_H
 
+#include "queue.h"
 #include "../dnn_interface.h"
 #include "libavutil/thread.h"
 
@@ -80,5 +81,7 @@ int ff_check_exec_params(void *ctx, DNNBackendType backend, DNNFunctionType func
  * @retval DNN_ERROR if flags are invalid or any parameter is NULL
  */
 DNNReturnType ff_dnn_fill_task(TaskItem *task, DNNExecBaseParams *exec_params, void *backend_model, int async, int do_ioproc);
+
+DNNAsyncStatusType dnn_get_async_result(Queue *task_queue, AVFrame **in, AVFrame **out);
 
 #endif

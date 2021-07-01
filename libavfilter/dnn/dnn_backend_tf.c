@@ -1191,22 +1191,7 @@ DNNReturnType ff_dnn_execute_model_async_tf(const DNNModel *model, DNNExecBasePa
 DNNAsyncStatusType ff_dnn_get_async_result_tf(const DNNModel *model, AVFrame **in, AVFrame **out)
 {
     TFModel *tf_model = model->model;
-    TaskItem *task = ff_queue_peek_front(tf_model->task_queue);
-
-    if (!task) {
-        return DAST_EMPTY_QUEUE;
-    }
-
-    if (task->inference_done != task->inference_todo) {
-        return DAST_NOT_READY;
-    }
-
-    *in = task->in_frame;
-    *out = task->out_frame;
-    ff_queue_pop_front(tf_model->task_queue);
-    av_freep(&task);
-
-    return DAST_SUCCESS;
+    return dnn_get_async_result(tf_model->task_queue, in, out);
 }
 
 DNNReturnType ff_dnn_flush_tf(const DNNModel *model)
