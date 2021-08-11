@@ -424,7 +424,7 @@ static int dnn_detect_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *o
     do {
         AVFrame *in_frame = NULL;
         AVFrame *out_frame = NULL;
-        async_state = ff_dnn_get_async_result(&ctx->dnnctx, &in_frame, &out_frame);
+        async_state = ff_dnn_get_result(&ctx->dnnctx, &in_frame, &out_frame);
         if (out_frame) {
             av_assert0(in_frame == out_frame);
             ret = ff_filter_frame(outlink, out_frame);
@@ -458,7 +458,7 @@ static int dnn_detect_activate_async(AVFilterContext *filter_ctx)
         if (ret < 0)
             return ret;
         if (ret > 0) {
-            if (ff_dnn_execute_model_async(&ctx->dnnctx, in, in) != DNN_SUCCESS) {
+            if (ff_dnn_execute_model(&ctx->dnnctx, in, in) != DNN_SUCCESS) {
                 return AVERROR(EIO);
             }
         }
@@ -468,7 +468,7 @@ static int dnn_detect_activate_async(AVFilterContext *filter_ctx)
     do {
         AVFrame *in_frame = NULL;
         AVFrame *out_frame = NULL;
-        async_state = ff_dnn_get_async_result(&ctx->dnnctx, &in_frame, &out_frame);
+        async_state = ff_dnn_get_result(&ctx->dnnctx, &in_frame, &out_frame);
         if (out_frame) {
             av_assert0(in_frame == out_frame);
             ret = ff_filter_frame(outlink, out_frame);
@@ -539,5 +539,5 @@ const AVFilter ff_vf_dnn_detect = {
     .inputs        = dnn_detect_inputs,
     .outputs       = dnn_detect_outputs,
     .priv_class    = &dnn_detect_class,
-    .activate      = dnn_detect_activate,
+    .activate      = dnn_detect_activate_async,
 };
